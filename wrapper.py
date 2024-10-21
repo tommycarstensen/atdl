@@ -63,41 +63,36 @@ def get_dataset_stats(data):
     return num_nodes, num_edges, num_features, num_classes, is_multilabel
 
 
-def model_function(layers, dropout):
-    return GCN_Model(hidden_size=64, layers=layers, output_size=num_classes).to(device)
 
-
-def process_dataset(name, data, device, model_name_template):
+def process_dataset(name, data, device, model_name_template, use_jk=False):
     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
     print(f"Dataset: {name}")
     print(f"Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}\n")
 
-    # Split into training, validation, and test sets
-    transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.1)
-    dataset_split = transform(data)
-    dataset_split = dataset_split.to(device)  # Move data to the correct device
+    # Prepare data loaders
+    if name == 'PPI':
+        # Load PPI dataset with predefined splits
+        train_dataset = PPI(root='data/PPI', split='train')
+        val_dataset = PPI(root='data/PPI', split='val')
+        test_dataset = PPI(root='data/PPI', split='test')
+        batch_size = 2  # Adjust based on your memory constraints
 
-    # Debugging statement to check the shape of x
-    print(f"Shape of x: {dataset_split.x.shape}")
+        # Create DataLoaders for PPI
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    else:
+        # Apply RandomNodeSplit transform to create train/val/test masks
+        transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.1)
+        data = transform(data)
+        data = data.to(device)  # Move data to the correct device
 
-    # Use Data objects directly
-    train_data = dataset_split
-    val_data = dataset_split
-    test_data = dataset_split
+        # Create DataLoaders with a single Data object
+        train_loader = DataLoader([data], batch_size=1, shuffle=False)
+        val_loader = DataLoader([data], batch_size=1, shuffle=False)
+        test_loader = DataLoader([data], batch_size=1, shuffle=False)
 
-    # # Set batch size based on the available memory or dataset size
-    # batch_size = 32 if name == 'Reddit' else None  # Example batch sizes
-
-    # # Use DataLoader to create mini-batches for training, validation, and test sets
-    # train_loader = DataLoader([dataset_split], batch_size=batch_size, shuffle=True)
-    # val_loader = DataLoader([dataset_split], batch_size=batch_size, shuffle=False)
-    # test_loader = DataLoader([dataset_split], batch_size=batch_size, shuffle=False)
-
-    # layers = 3
-    # epochs = 100
-    # learning_rate = 0.001
-    # weight_decay = 0.0005
-    # dropout = 0.5
+    # Model hyperparameters
     layers = 2
     epochs = 200
     learning_rate = 0.01
@@ -105,6 +100,7 @@ def process_dataset(name, data, device, model_name_template):
     dropout = 0.5
     model_name = model_name_template.format(layers=layers, epochs=epochs)
 
+    # Load saved results if available
     saved_results = load_results(name, model_name)
     if saved_results:
         print(f"Loading saved results for {name}: {saved_results}")
@@ -115,12 +111,7 @@ def process_dataset(name, data, device, model_name_template):
         weighted_f1 = saved_results['weighted_f1_score']
         f1 = saved_results['f1_score']
     else:
-        # def model_function(layers, dropout):
-        #     model = GCN_Model(
-        #         hidden_size=64, layers=layers, output_size=num_classes).to(device)
-        #     if load_model(model, model_name, name):
-        #         print(f"Loaded model for {name}")
-        #     return model
+        # Define the model function
         def model_function(layers, dropout):
             jk_mode = 'cat'  # Choose 'cat', 'max', or 'lstm'
             model = GCN_JK_Model(
@@ -129,46 +120,78 @@ def process_dataset(name, data, device, model_name_template):
                 print(f"Loaded model for {name}")
             return model
 
+        # Train and test the model
         model_trained, mean_acc, std_acc = train_and_test_model(
-            train_data, val_data, test_data,
-            # train_loader, val_loader, test_loader,
+            train_loader, val_loader, test_loader,
             model_function, layers, epochs, learning_rate, weight_decay, dropout, device,
             is_multilabel=is_multilabel,
-            
         )
         save_model(model_trained, model_name, name)
 
-        # Calculate F1 Score (Micro F1)
-        pred = model_trained(test_data.x, test_data.edge_index)
-        # pred = model_trained(dataset_split.x, dataset_split.edge_index)
-        if is_multilabel:
-            preds = torch.sigmoid(pred).cpu()
-            preds = (preds > 0.5).float()
-            labels = test_data.y.cpu()
-            micro_f1 = f1_score(labels, preds, average='micro')
-            macro_f1 = f1_score(labels, preds, average='macro')
-            weighted_f1 = f1_score(labels, preds, average='weighted')
-            f1 = f1_score(labels, preds, average=None)
-        else:
-            preds = pred.argmax(dim=-1).cpu()
-            labels = test_data.y.cpu()
-            micro_f1 = f1_score(labels, preds, average='micro')
-            macro_f1 = f1_score(labels, preds, average='macro')
-            weighted_f1 = f1_score(labels, preds, average='weighted')
-            f1 = f1_score(labels, preds, average=None)
+        # Evaluate the model using the extracted function
+        all_preds, all_labels = eval_model(
+            model_trained, test_loader, device, is_multilabel, name
+        )
 
+        # Calculate evaluation metrics
+        if is_multilabel:
+            micro_f1 = f1_score(all_labels, all_preds, average='micro')
+            macro_f1 = f1_score(all_labels, all_preds, average='macro')
+            weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
+            f1 = f1_score(all_labels, all_preds, average=None)
+        else:
+            micro_f1 = f1_score(all_labels, all_preds, average='micro')
+            macro_f1 = f1_score(all_labels, all_preds, average='macro')
+            weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
+            f1 = f1_score(all_labels, all_preds, average=None)
+
+        # Save results
         results = {
             'mean_accuracy': mean_acc.item(),
             'std_accuracy': std_acc.item(),
             'micro_f1_score': micro_f1,
             'macro_f1_score': macro_f1,
             'weighted_f1_score': weighted_f1,
-            'f1_score': f1,
+            'f1_score': f1.tolist(),
         }
         save_results(results, name, model_name)
 
     print(f"Mean accuracy for {name}: {mean_acc}, Standard deviation: {std_acc}")
     print(f"Micro F1 Score for {name}: {micro_f1}\n")
+
+
+def eval_model(model, test_loader, device, is_multilabel, dataset_name):
+    model.eval()
+    all_preds = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = batch.to(device)
+            pred = model(batch.x, batch.edge_index)
+
+            if dataset_name != 'PPI':
+                # Use test mask for single-graph datasets
+                test_mask = batch.test_mask
+                pred = pred[test_mask]
+                labels = batch.y[test_mask]
+            else:
+                # For PPI, labels are already correct
+                labels = batch.y
+
+            if is_multilabel:
+                preds = torch.sigmoid(pred)
+                preds = (preds > 0.5).float()
+            else:
+                preds = pred.argmax(dim=-1)
+
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
+
+    all_preds = torch.cat(all_preds)
+    all_labels = torch.cat(all_labels)
+
+    return all_preds, all_labels
+
 
 # Load datasets
 citeseer_data = Planetoid(root='data/Citeseer', name='Citeseer')[0]
@@ -196,5 +219,6 @@ for name, data in datasets.items():
     print()
 
 for name, data in datasets.items():
-    # if name == 'Reddit': continue  # memory issue?
-    process_dataset(name, data, device, model_name_template="GCN_{layers}_layers_{epochs}_epochs")
+    if name == 'Reddit': continue  # memory issue?
+    process_dataset(
+        name, data, device, model_name_template="GCN_{layers}_layers_{epochs}_epochs")
