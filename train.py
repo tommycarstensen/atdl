@@ -57,27 +57,30 @@ def train_loop_with_early_stopping(
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            pred = model(batch.x, batch.edge_index)
+            out = model(batch.x, batch.edge_index)
+
+            # Compute loss only on training nodes
             if is_multilabel:
-                loss = loss_fn(pred, batch.y.float())
+                loss = loss_fn(out[batch.train_mask], batch.y[batch.train_mask].float())
             else:
-                loss = loss_fn(pred, batch.y)
+                loss = loss_fn(out[batch.train_mask], batch.y[batch.train_mask])
             loss.backward()
             optimizer.step()
 
         # Validation phase
         model.eval()
-        val_losses = []
+        val_loss = 0
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
-                val_pred = model(batch.x, batch.edge_index)
+                out = model(batch.x, batch.edge_index)
+
+                # Compute loss only on validation nodes
                 if is_multilabel:
-                    val_loss = loss_fn(val_pred, batch.y.float())
+                    val_loss += loss_fn(out[batch.val_mask], batch.y[batch.val_mask].float()).item()
                 else:
-                    val_loss = loss_fn(val_pred, batch.y)
-                val_losses.append(val_loss.item())
-        avg_val_loss = sum(val_losses) / len(val_losses)
+                    val_loss += loss_fn(out[batch.val_mask], batch.y[batch.val_mask]).item()
+        avg_val_loss = val_loss / len(val_loader)
 
         # Check for early stopping
         if avg_val_loss < best_val_loss:
@@ -104,13 +107,17 @@ def train_loop_with_early_stopping(
 
 
 def train_and_validate(
-    train_dataloader, val_dataloader, model_function, loss_fn, layers, epochs, learning_rate, weight_decay, dropout, wandb_iteration, is_multilabel=False, wandb_toggle=False,
+    # train_dataloader, val_dataloader,
+    loader,
+    model_function, loss_fn, layers, epochs, learning_rate, weight_decay, dropout, wandb_iteration, is_multilabel=False, wandb_toggle=False,
     ):
     model = model_function(layers, dropout)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     train_loop_with_early_stopping(
-        train_dataloader, val_dataloader, model, loss_fn, optimizer, epochs,
+        # train_dataloader, val_dataloader,
+        loader,
+        model, loss_fn, optimizer, epochs,
         wandb_iteration=wandb_iteration,
         wandb_toggle=wandb_toggle,
         is_multilabel=is_multilabel,
@@ -135,35 +142,8 @@ def train_and_validate(
 
 
 def test_on_testset(
-    test_dataloader, model, device, is_multilabel=False,
-):
-    MCAccuracies = []
-
-    for _ in range(3):
-        transform = RandomNodeSplit(split="train_rest", num_val=0.33, num_test=0.33)
-        test_data_split = transform(test_dataloader).to(device)
-        test_data_split.subgraph(test_data_split["train_mask"])
-
-        pred = model(test_data_split.x, test_data_split.edge_index)
-        if is_multilabel:
-            preds = torch.sigmoid(pred)
-            preds = (preds > 0.5).float()
-            labels = test_data_split.y.float()
-            MCAccuracy = f1_score(labels.cpu(), preds.cpu(), average='micro')
-            MCAccuracy = torch.tensor(MCAccuracy)
-        else:
-            metric = MulticlassAccuracy()
-            metric.update(pred.argmax(-1), test_data_split.y)
-            MCAccuracy = metric.compute()
-
-        MCAccuracies.append(MCAccuracy)
-
-    MCAccuracies = torch.stack(MCAccuracies)
-    return torch.mean(MCAccuracies), torch.std(MCAccuracies)
-
-
-def test_on_testset_without_randomnodesplit(
-    test_loader, model, device, is_multilabel=False,
+    test_loader,
+    model, device, is_multilabel=False,
 ):
     model.eval()
     all_preds = []
@@ -172,21 +152,22 @@ def test_on_testset_without_randomnodesplit(
     with torch.no_grad():
         for batch in test_loader:
             batch = batch.to(device)
-            pred = model(batch.x, batch.edge_index)
+            out = model(batch.x, batch.edge_index)
 
+            # Use test_mask to select test nodes
             if is_multilabel:
-                preds = torch.sigmoid(pred)
+                preds = torch.sigmoid(out[batch.test_mask])
                 preds = (preds > 0.5).float()
-                labels = batch.y.float()
+                labels = batch.y[batch.test_mask].float()
             else:
-                preds = pred.argmax(dim=-1)
-                labels = batch.y
+                preds = out[batch.test_mask].argmax(dim=1)
+                labels = batch.y[batch.test_mask]
 
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
 
-    all_preds = torch.cat(all_preds, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
+    all_preds = torch.cat(all_preds)
+    all_labels = torch.cat(all_labels)
 
     if is_multilabel:
         micro_f1 = f1_score(all_labels, all_preds, average='micro')
@@ -199,8 +180,10 @@ def test_on_testset_without_randomnodesplit(
     return mean_acc, std_acc
 
 
+
 def train_and_test_model(
-    train_loader, val_loader, test_loader, model_function,
+    train_loader, val_loader, test_loader,
+    model_function,
     layers, epochs, learning_rate, weight_decay, dropout,
     device,
     is_multilabel=False,
@@ -215,13 +198,15 @@ def train_and_test_model(
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     train_loop_with_early_stopping(
-        train_loader, val_loader, device, model, loss_fn, optimizer, epochs,
+        train_loader, val_loader,
+        device, model, loss_fn, optimizer, epochs,
         patience=100,
         is_multilabel=is_multilabel,
         wandb_toggle=wandb_toggle,
     )
 
-    mean_acc, std_acc = test_on_testset_without_randomnodesplit(
-        test_loader, model, device, is_multilabel=is_multilabel)
+    mean_acc, std_acc = test_on_testset(
+        test_loader,
+        model, device, is_multilabel=is_multilabel)
 
     return model, mean_acc, std_acc

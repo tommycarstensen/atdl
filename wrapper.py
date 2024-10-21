@@ -67,7 +67,10 @@ def get_dataset_stats(data):
 
 
 
-def process_dataset(name, data, device, model_name_template, use_jk=False):
+def process_dataset(
+        name, data, device, model_name_template,
+        use_jk=False, jk_mode='max',
+        ):
     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
     print(f"Dataset: {name}")
     print(f"Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}\n")
@@ -88,23 +91,40 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
         # Apply RandomNodeSplit transform to create train/val/test masks
         transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.1)
         data = transform(data)
+        verify_masks(data)  # Verify masks do not overlap
         data = data.to(device)  # Move data to the correct device
 
         batch_size = 32 if name == 'Reddit' else 1
 
+        # Now create the subgraphs for the training, validation, and test sets
+        train_set = data.subgraph(data.train_mask)
+        val_set = data.subgraph(data.val_mask)
+        test_set = data.subgraph(data.test_mask)
+
         # Create DataLoaders with a single Data object
-        train_loader = DataLoader([data], batch_size=batch_size, shuffle=False)
-        val_loader = DataLoader([data], batch_size=batch_size, shuffle=False)
-        test_loader = DataLoader([data], batch_size=batch_size, shuffle=False)
+        # train_loader = DataLoader([train_set], batch_size=batch_size, shuffle=False)
+        # val_loader = DataLoader([val_set], batch_size=batch_size, shuffle=False)
+        # test_loader = DataLoader([test_set], batch_size=batch_size, shuffle=False)
+
+        loader = DataLoader([data], batch_size=1, shuffle=False)
+        train_loader = val_loader = test_loader = loader
 
     # Model hyperparameters
-    layers = 2
-    epochs = 200
-    learning_rate = 0.001
-    weight_decay = 0.0005
-    # dropout = 0.5
-    dropout = 0.5 if name == 'Reddit' else 0.3
-    model_name = model_name_template.format(layers=layers, epochs=epochs)
+    hyperparameters = dict(
+        # layers = 6 if name in ('PPI', 'Reddit') else 3,
+        # layers = 6,
+        layers=2 if name in ('Citeseer', 'Cora') else 6,
+        epochs = 300,
+        learning_rate = 0.005,  # 0.005 in Xu2018
+        weight_decay = 0.0005,  # 0.0005 in Xu2018
+        # weight_decay = 0.001,  # Increase regularization
+        # dropout = 0.5
+        # dropout = 0.5 if name == 'Reddit' else 0.3
+        dropout = 0.5,  # 0.5 in Xu2018
+        hidden_size = 16 if name in ('Citeseer', 'Cora') else 32,
+    )
+    model_name = model_name_template.format(
+        layers=hyperparameters['layers'], epochs=hyperparameters['epochs'])
     if use_jk is True:
         model_name = f'JK_{model_name}'  # Add JK prefix to distinguish models
 
@@ -118,13 +138,12 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
     else:
         # Define the model function
         def model_function(layers, dropout):
-            jk_mode = 'cat'  # Choose 'cat', 'max', or 'lstm'
             if use_jk is True:
                 model = GCN_JK_Model(
-                    hidden_size=6, layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
+                    hidden_size=hyperparameters['hidden_size'], layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
             else:
                 model = GCN_Model(
-                    hidden_size=6, layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
+                    hidden_size=hyperparameters['hidden_size'], layers=layers, output_size=num_classes).to(device)
             if load_model(model, model_name, name):
                 print(f"Loaded model for {name}")
             return model
@@ -132,7 +151,13 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
         # Train and test the model
         model_trained, mean_acc, std_acc = train_and_test_model(
             train_loader, val_loader, test_loader,
-            model_function, layers, epochs, learning_rate, weight_decay, dropout, device,
+            model_function,
+            hyperparameters['layers'],
+            hyperparameters['epochs'],
+            hyperparameters['learning_rate'],
+            hyperparameters['weight_decay'],
+            hyperparameters['dropout'],
+            device,
             is_multilabel=is_multilabel,
             wandb_toggle=True,
         )
@@ -140,7 +165,7 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
 
         # Evaluate the model using the extracted function
         all_preds, all_labels = eval_model(
-            model_trained, test_loader, device, is_multilabel, name
+            model_trained, test_loader, device, is_multilabel,
         )
 
         # Calculate evaluation metrics
@@ -156,43 +181,42 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
 
     print(f"Mean accuracy for {name}: {mean_acc}, Standard deviation: {std_acc}")
     print(f"Micro F1 Score for {name}: {micro_f1}")
-    print('learning_rate', learning_rate)
-    print('dropout', dropout)
+    for k, v in hyperparameters.items():
+        print(k, v)
+    print('jk_mode', jk_mode)
+
     print()
 
 
-def eval_model(model, test_loader, device, is_multilabel, dataset_name):
+def eval_model(model, loader, device, is_multilabel):
     model.eval()
     all_preds = []
     all_labels = []
     with torch.no_grad():
-        for batch in test_loader:
+        for batch in loader:
             batch = batch.to(device)
-            pred = model(batch.x, batch.edge_index)
-
-            if dataset_name != 'PPI':
-                # Use test mask for single-graph datasets
-                test_mask = batch.test_mask
-                pred = pred[test_mask]
-                labels = batch.y[test_mask]
-            else:
-                # For PPI, labels are already correct
-                labels = batch.y
-
+            out = model(batch.x, batch.edge_index)
             if is_multilabel:
-                preds = torch.sigmoid(pred)
+                preds = torch.sigmoid(out[batch.test_mask])
                 preds = (preds > 0.5).float()
+                labels = batch.y[batch.test_mask].float()
             else:
-                preds = pred.argmax(dim=-1)
-
+                preds = out[batch.test_mask].argmax(dim=1)
+                labels = batch.y[batch.test_mask]
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
 
     all_preds = torch.cat(all_preds)
     all_labels = torch.cat(all_labels)
-
     return all_preds, all_labels
 
+def verify_masks(data):
+    train_mask = data.train_mask
+    val_mask = data.val_mask
+    test_mask = data.test_mask
+    assert not torch.any(train_mask & val_mask), "Train and validation masks overlap!"
+    assert not torch.any(train_mask & test_mask), "Train and test masks overlap!"
+    assert not torch.any(val_mask & test_mask), "Validation and test masks overlap!"
 
 # Load datasets
 citeseer_data = Planetoid(root='data/Citeseer', name='Citeseer')[0]
@@ -219,9 +243,15 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #     print('is_multilabel', is_multilabel)
 #     print()
 
+jk_mode = 'max'  # Choose 'cat', 'max', or 'lstm'
+
+
+
 for name, data in datasets.items():
     if name == 'Reddit': continue  # memory issue?
+    verify_masks(data)
     wandb.init(project="gcn_project", name=f"{name}_run")
     process_dataset(
-        name, data, device, model_name_template="{layers}_layers_{epochs}_epochs", use_jk=True)
+        name, data, device, model_name_template="{layers}_layers_{epochs}_epochs",
+        use_jk=True, jk_mode=jk_mode)
     wandb.finish()  # End the WandB run after processing each dataset
