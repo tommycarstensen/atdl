@@ -151,7 +151,11 @@ def train_and_test_model(
     device,
     is_multilabel
 ):
-    loss_fn = nn.CrossEntropyLoss()
+
+    if is_multilabel:
+        loss_fn = nn.BCEWithLogitsLoss()
+    else:
+        loss_fn = nn.CrossEntropyLoss()
 
     model_trained, _ = train_and_validate(
         train_dataloader, val_dataloader, model, loss_fn, layers, epochs, learning_rate,
