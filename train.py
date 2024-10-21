@@ -96,7 +96,13 @@ def train_and_validate(
     model = model_function(layers, dropout)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    train_loop_with_early_stopping(train_dataloader, val_dataloader, model, loss_fn, optimizer, epochs, wandb_iteration, wandb_toggle, is_multilabel=is_multilabel)
+    train_loop_with_early_stopping(
+        train_dataloader, val_dataloader, model, loss_fn, optimizer, epochs,
+        wandb_iteration=wandb_iteration,
+        wandb_toggle=wandb_toggle,
+        is_multilabel=is_multilabel,
+        patience=100,
+        )
 
     model.eval()
     with torch.no_grad():
