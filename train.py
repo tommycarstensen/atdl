@@ -6,6 +6,8 @@ from typing import Callable
 from torch_geometric.transforms import RandomNodeSplit
 import wandb
 from torch import nn
+from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score
 
 def train_loop(
     train_dataloader: torch_geometric.data.data.Data,
@@ -122,7 +124,6 @@ def train_and_validate(
             preds = torch.sigmoid(pred)
             preds = (preds > 0.5).float()
             labels = val_dataloader.y.float()
-            from sklearn.metrics import f1_score
             MCAccuracy = f1_score(labels.cpu(), preds.cpu(), average='micro')
             MCAccuracy = torch.tensor(MCAccuracy)
         else:
@@ -148,7 +149,6 @@ def test_on_testset(
             preds = torch.sigmoid(pred)
             preds = (preds > 0.5).float()
             labels = test_data_split.y.float()
-            from sklearn.metrics import f1_score
             MCAccuracy = f1_score(labels.cpu(), preds.cpu(), average='micro')
             MCAccuracy = torch.tensor(MCAccuracy)
         else:
@@ -189,15 +189,10 @@ def test_on_testset_without_randomnodesplit(
     all_labels = torch.cat(all_labels, dim=0)
 
     if is_multilabel:
-        from sklearn.metrics import f1_score
         micro_f1 = f1_score(all_labels, all_preds, average='micro')
-        # macro_f1 = f1_score(all_labels, all_preds, average='macro')
-        # weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
-        # f1_scores = f1_score(all_labels, all_preds, average=None)
         mean_acc = torch.tensor(micro_f1)
         std_acc = torch.tensor(0.0)  # Standard deviation not computed here
     else:
-        from sklearn.metrics import accuracy_score
         mean_acc = torch.tensor(accuracy_score(all_labels, all_preds))
         std_acc = torch.tensor(0.0)  # Standard deviation not computed here
 
@@ -208,7 +203,8 @@ def train_and_test_model(
     train_loader, val_loader, test_loader, model_function,
     layers, epochs, learning_rate, weight_decay, dropout,
     device,
-    is_multilabel=False
+    is_multilabel=False,
+    wandb_toggle=False,
 ):
     if is_multilabel:
         loss_fn = nn.BCEWithLogitsLoss()
@@ -222,6 +218,7 @@ def train_and_test_model(
         train_loader, val_loader, device, model, loss_fn, optimizer, epochs,
         patience=100,
         is_multilabel=is_multilabel,
+        wandb_toggle=wandb_toggle,
     )
 
     mean_acc, std_acc = test_on_testset_without_randomnodesplit(

@@ -8,6 +8,9 @@ from sklearn.metrics import f1_score
 from train import train_and_test_model  # Import from train.py
 from models import GCN_Model, GCN_JK_Model  # Import the model from models.py
 import numpy as np
+import wandb
+
+# wandb.login()
 
 # Create directories if they don't exist
 if not os.path.exists('trained_models'):
@@ -87,18 +90,23 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
         data = transform(data)
         data = data.to(device)  # Move data to the correct device
 
+        batch_size = 32 if name == 'Reddit' else 1
+
         # Create DataLoaders with a single Data object
-        train_loader = DataLoader([data], batch_size=1, shuffle=False)
-        val_loader = DataLoader([data], batch_size=1, shuffle=False)
-        test_loader = DataLoader([data], batch_size=1, shuffle=False)
+        train_loader = DataLoader([data], batch_size=batch_size, shuffle=False)
+        val_loader = DataLoader([data], batch_size=batch_size, shuffle=False)
+        test_loader = DataLoader([data], batch_size=batch_size, shuffle=False)
 
     # Model hyperparameters
     layers = 2
     epochs = 200
-    learning_rate = 0.01
+    learning_rate = 0.001
     weight_decay = 0.0005
-    dropout = 0.5
+    # dropout = 0.5
+    dropout = 0.5 if name == 'Reddit' else 0.3
     model_name = model_name_template.format(layers=layers, epochs=epochs)
+    if use_jk is True:
+        model_name = f'JK_{model_name}'  # Add JK prefix to distinguish models
 
     # Load saved results if available
     saved_results = load_results(name, model_name)
@@ -107,15 +115,16 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
         mean_acc = saved_results['mean_accuracy']
         std_acc = saved_results['std_accuracy']
         micro_f1 = saved_results['micro_f1_score']
-        macro_f1 = saved_results['macro_f1_score']
-        weighted_f1 = saved_results['weighted_f1_score']
-        f1 = saved_results['f1_score']
     else:
         # Define the model function
         def model_function(layers, dropout):
             jk_mode = 'cat'  # Choose 'cat', 'max', or 'lstm'
-            model = GCN_JK_Model(
-                hidden_size=64, layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
+            if use_jk is True:
+                model = GCN_JK_Model(
+                    hidden_size=6, layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
+            else:
+                model = GCN_Model(
+                    hidden_size=6, layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
             if load_model(model, model_name, name):
                 print(f"Loaded model for {name}")
             return model
@@ -125,6 +134,7 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
             train_loader, val_loader, test_loader,
             model_function, layers, epochs, learning_rate, weight_decay, dropout, device,
             is_multilabel=is_multilabel,
+            wandb_toggle=True,
         )
         save_model(model_trained, model_name, name)
 
@@ -134,30 +144,21 @@ def process_dataset(name, data, device, model_name_template, use_jk=False):
         )
 
         # Calculate evaluation metrics
-        if is_multilabel:
-            micro_f1 = f1_score(all_labels, all_preds, average='micro')
-            macro_f1 = f1_score(all_labels, all_preds, average='macro')
-            weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
-            f1 = f1_score(all_labels, all_preds, average=None)
-        else:
-            micro_f1 = f1_score(all_labels, all_preds, average='micro')
-            macro_f1 = f1_score(all_labels, all_preds, average='macro')
-            weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
-            f1 = f1_score(all_labels, all_preds, average=None)
+        micro_f1 = f1_score(all_labels, all_preds, average='micro')
 
         # Save results
         results = {
             'mean_accuracy': mean_acc.item(),
             'std_accuracy': std_acc.item(),
             'micro_f1_score': micro_f1,
-            'macro_f1_score': macro_f1,
-            'weighted_f1_score': weighted_f1,
-            'f1_score': f1.tolist(),
         }
         save_results(results, name, model_name)
 
     print(f"Mean accuracy for {name}: {mean_acc}, Standard deviation: {std_acc}")
-    print(f"Micro F1 Score for {name}: {micro_f1}\n")
+    print(f"Micro F1 Score for {name}: {micro_f1}")
+    print('learning_rate', learning_rate)
+    print('dropout', dropout)
+    print()
 
 
 def eval_model(model, test_loader, device, is_multilabel, dataset_name):
@@ -210,15 +211,17 @@ datasets = {
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Process each dataset
-for name, data in datasets.items():
-    num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
-    print(f"Dataset: {name}")
-    print(f"Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}")
-    print('is_multilabel', is_multilabel)
-    print()
+# # Process each dataset
+# for name, data in datasets.items():
+#     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
+#     print(f"Dataset: {name}")
+#     print(f"Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}")
+#     print('is_multilabel', is_multilabel)
+#     print()
 
 for name, data in datasets.items():
     if name == 'Reddit': continue  # memory issue?
+    wandb.init(project="gcn_project", name=f"{name}_run")
     process_dataset(
-        name, data, device, model_name_template="GCN_{layers}_layers_{epochs}_epochs")
+        name, data, device, model_name_template="{layers}_layers_{epochs}_epochs", use_jk=True)
+    wandb.finish()  # End the WandB run after processing each dataset
