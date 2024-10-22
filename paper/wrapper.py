@@ -11,6 +11,7 @@ from models import GCN_Model, GAT_Model, GCN_JK_Model, GAT_JK_Model
 import numpy as np
 import wandb
 import time
+from sklearn.metrics import f1_score, accuracy_score
 
 # wandb.login()
 
@@ -193,12 +194,9 @@ def process_dataset(
         save_model(model_trained, name_formatted)
 
         # Evaluate the model using the extracted function
-        all_preds, all_labels = eval_model(
+        mean_acc, std_acc, micro_f1 = eval_model(
             model_trained, test_loader, device, is_multilabel,
         )
-
-        # Calculate evaluation metrics
-        micro_f1 = f1_score(all_labels, all_preds, average='micro')
 
         # Save results
         results = {
@@ -229,10 +227,85 @@ def process_dataset(
     print()
 
 
-def eval_model(model, loader, device, is_multilabel):
+def eval_model(model, loader, device, is_multilabel, num_splits=3):
+
+    # TODO: REFACTOR THIS FUNCTION, IF YOU HAVE TIME!!! IT HAS BECOME A MESS!!!
+
+    model.eval()
+    accuracies = []
+    with torch.no_grad():
+        for split_num in range(num_splits):
+            # Set a different random seed for each split
+            torch.manual_seed(42 + split_num)
+            np.random.seed(42 + split_num)
+
+            # For datasets like Cora and Citeseer (single graph)
+            if hasattr(loader.dataset, 'data') and isinstance(loader.dataset.data, torch_geometric.data.Data):
+                data = loader.dataset.data.clone()
+                # Create a new random split
+                transform = RandomNodeSplit(split='random', num_val=0.0, num_test=0.1)
+                data = transform(data).to(device)
+
+                out = model(data.x, data.edge_index)
+                if is_multilabel:
+                    preds = torch.sigmoid(out)
+                    preds = (preds > 0.5).float()
+                    labels = data.y.float()
+                    test_mask = data.test_mask
+                    micro_f1 = f1_score(labels[test_mask].cpu(), preds[test_mask].cpu(), average='micro')
+                    accuracies.append(micro_f1)
+                else:
+                    preds = out.argmax(dim=1)
+                    labels = data.y
+                    test_mask = data.test_mask
+                    acc = accuracy_score(labels[test_mask].cpu(), preds[test_mask].cpu())
+                    accuracies.append(acc)
+            else:
+                # For datasets like PPI (multi-graph)
+                # We can shuffle the test dataset to simulate variability
+                test_dataset = loader.dataset
+                test_loader = DataLoader(test_dataset, batch_size=loader.batch_size, shuffle=True)
+
+                all_preds = []
+                all_labels = []
+                for batch in test_loader:
+                    batch = batch.to(device)
+                    out = model(batch.x, batch.edge_index)
+                    if is_multilabel:
+                        preds = torch.sigmoid(out)
+                        preds = (preds > 0.5).float()
+                        labels = batch.y.float()
+                    else:
+                        preds = out.argmax(dim=1)
+                        labels = batch.y
+
+                    all_preds.append(preds.cpu())
+                    all_labels.append(labels.cpu())
+
+                all_preds = torch.cat(all_preds)
+                all_labels = torch.cat(all_labels)
+
+                if is_multilabel:
+                    micro_f1 = f1_score(all_labels, all_preds, average='micro')
+                    accuracies.append(micro_f1)
+                else:
+                    acc = accuracy_score(all_labels, all_preds)
+                    accuracies.append(acc)
+
+    mean_acc = torch.tensor(accuracies).mean().item()
+    std_acc = torch.tensor(accuracies).std().item()
+
+    # Calculate evaluation metrics
+    micro_f1 = f1_score(all_labels, all_preds, average='micro')
+
+    return mean_acc, std_acc, micro_f1
+
+
+def eval_model_old(model, loader, device, is_multilabel):
     model.eval()
     all_preds = []
     all_labels = []
+    accuracies = []
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
@@ -302,10 +375,10 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #     print()
 
 models = {
-    'GCN': GCN_Model,
-    'GAT': GAT_Model,
     'GCN_JK': GCN_JK_Model,
     'GAT_JK_Model': GAT_JK_Model,
+    'GCN': GCN_Model,
+    'GAT': GAT_Model,
 }
 
 for dataset_name, data in datasets.items():

@@ -161,7 +161,6 @@ def test_on_testset(
     test_loader,
     model, device, is_multilabel=False,
     # "Accuracy and standard deviation are computed from 3 random data splits."
-    num_splits=3,
 ):
 
     model.eval()
@@ -170,43 +169,38 @@ def test_on_testset(
     accuracies = []
 
     with torch.no_grad():
-        # Perform evaluation over the dataset for each split
-        for split_num in range(num_splits):
-            # Reinitialize random split here for each split_num
-            # Random split for multi-graph datasets
-            torch.manual_seed(42 + split_num)  # Ensure different random split each time
-            for batch in test_loader:
-                batch = batch.to(device)
-                out = model(batch.x, batch.edge_index)
+        for batch in test_loader:
+            batch = batch.to(device)
+            out = model(batch.x, batch.edge_index)
 
-                # Determine test indices
-                if hasattr(batch, 'test_mask'):
-                    test_indices = batch.test_mask
-                else:
-                    # Use all nodes in the batch
-                    test_indices = torch.arange(batch.num_nodes, device=device)
+            # Determine test indices
+            if hasattr(batch, 'test_mask'):
+                test_indices = batch.test_mask
+            else:
+                # Use all nodes in the batch
+                test_indices = torch.arange(batch.num_nodes, device=device)
 
-                # Get predictions and labels
-                if is_multilabel:
-                    # Apply sigmoid activation for multi-label classification
-                    preds = torch.sigmoid(out[test_indices])
-                    # Binarize predictions
-                    preds = (preds > 0.5).float()
-                    labels = batch.y[test_indices].float()
-                    # Compute micro-F1 score for the current batch
-                    micro_f1 = f1_score(labels.cpu(), preds.cpu(), average='micro')
-                    total_accuracy_or_micro_f1 += micro_f1
-                    num_batches += 1
-                else:
-                    preds = out[test_indices].argmax(dim=1)
-                    labels = batch.y[test_indices]
-                    # Compute accuracy for the current batch
-                    acc = accuracy_score(labels.cpu(), preds.cpu())
-                    total_accuracy_or_micro_f1 += acc
-                    num_batches += 1
+            # Get predictions and labels
+            if is_multilabel:
+                # Apply sigmoid activation for multi-label classification
+                preds = torch.sigmoid(out[test_indices])
+                # Binarize predictions
+                preds = (preds > 0.5).float()
+                labels = batch.y[test_indices].float()
+                # Compute micro-F1 score for the current batch
+                micro_f1 = f1_score(labels.cpu(), preds.cpu(), average='micro')
+                total_accuracy_or_micro_f1 += micro_f1
+                num_batches += 1
+            else:
+                preds = out[test_indices].argmax(dim=1)
+                labels = batch.y[test_indices]
+                # Compute accuracy for the current batch
+                acc = accuracy_score(labels.cpu(), preds.cpu())
+                total_accuracy_or_micro_f1 += acc
+                num_batches += 1
 
-            # Store accuracy for each split
-            accuracies.append(total_accuracy_or_micro_f1 / num_batches)
+        # Store accuracy for each split
+        accuracies.append(total_accuracy_or_micro_f1 / num_batches)
 
     # Convert accuracies to tensor to compute mean and std deviation
     accuracies_tensor = torch.tensor(accuracies)
