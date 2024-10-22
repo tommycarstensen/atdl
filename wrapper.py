@@ -196,13 +196,23 @@ def eval_model(model, loader, device, is_multilabel):
         for batch in loader:
             batch = batch.to(device)
             out = model(batch.x, batch.edge_index)
-            if is_multilabel:
-                preds = torch.sigmoid(out[batch.test_mask])
-                preds = (preds > 0.5).float()
-                labels = batch.y[batch.test_mask].float()
+
+            # Determine test indices
+            if hasattr(batch, 'test_mask'):
+                test_indices = batch.test_mask
             else:
-                preds = out[batch.test_mask].argmax(dim=1)
-                labels = batch.y[batch.test_mask]
+                # Use all nodes in the batch
+                test_indices = torch.arange(batch.num_nodes, device=device)
+
+            # Get predictions and labels
+            if is_multilabel:
+                preds = torch.sigmoid(out[test_indices])
+                preds = (preds > 0.5).float()
+                labels = batch.y[test_indices].float()
+            else:
+                preds = out[test_indices].argmax(dim=1)
+                labels = batch.y[test_indices]
+
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
 
@@ -249,7 +259,8 @@ jk_mode = 'max'  # Choose 'cat', 'max', or 'lstm'
 
 for name, data in datasets.items():
     if name == 'Reddit': continue  # memory issue?
-    verify_masks(data)
+    if name != 'PPI':
+        verify_masks(data)
     wandb.init(project="gcn_project", name=f"{name}_run")
     process_dataset(
         name, data, device, model_name_template="{layers}_layers_{epochs}_epochs",

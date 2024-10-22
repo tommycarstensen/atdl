@@ -59,11 +59,19 @@ def train_loop_with_early_stopping(
             optimizer.zero_grad()
             out = model(batch.x, batch.edge_index)
 
-            # Compute loss only on training nodes
-            if is_multilabel:
-                loss = loss_fn(out[batch.train_mask], batch.y[batch.train_mask].float())
+            # Determine training indices
+            if hasattr(batch, 'train_mask'):
+                train_indices = batch.train_mask
             else:
-                loss = loss_fn(out[batch.train_mask], batch.y[batch.train_mask])
+                # Use all nodes in the batch
+                train_indices = torch.arange(batch.num_nodes, device=device)
+
+            # Compute loss on the appropriate nodes
+            if is_multilabel:
+                loss = loss_fn(out[train_indices], batch.y[train_indices].float())
+            else:
+                loss = loss_fn(out[train_indices], batch.y[train_indices])
+
             loss.backward()
             optimizer.step()
 
@@ -75,11 +83,19 @@ def train_loop_with_early_stopping(
                 batch = batch.to(device)
                 out = model(batch.x, batch.edge_index)
 
-                # Compute loss only on validation nodes
-                if is_multilabel:
-                    val_loss += loss_fn(out[batch.val_mask], batch.y[batch.val_mask].float()).item()
+                # Determine validation indices
+                if hasattr(batch, 'val_mask'):
+                    val_indices = batch.val_mask
                 else:
-                    val_loss += loss_fn(out[batch.val_mask], batch.y[batch.val_mask]).item()
+                    # Use all nodes in the batch
+                    val_indices = torch.arange(batch.num_nodes, device=device)
+
+                # Compute validation loss
+                if is_multilabel:
+                    val_loss += loss_fn(out[val_indices], batch.y[val_indices].float()).item()
+                else:
+                    val_loss += loss_fn(out[val_indices], batch.y[val_indices]).item()
+
         avg_val_loss = val_loss / len(val_loader)
 
         # Check for early stopping
@@ -154,14 +170,21 @@ def test_on_testset(
             batch = batch.to(device)
             out = model(batch.x, batch.edge_index)
 
-            # Use test_mask to select test nodes
-            if is_multilabel:
-                preds = torch.sigmoid(out[batch.test_mask])
-                preds = (preds > 0.5).float()
-                labels = batch.y[batch.test_mask].float()
+            # Determine test indices
+            if hasattr(batch, 'test_mask'):
+                test_indices = batch.test_mask
             else:
-                preds = out[batch.test_mask].argmax(dim=1)
-                labels = batch.y[batch.test_mask]
+                # Use all nodes in the batch
+                test_indices = torch.arange(batch.num_nodes, device=device)
+
+            # Get predictions and labels
+            if is_multilabel:
+                preds = torch.sigmoid(out[test_indices])
+                preds = (preds > 0.5).float()
+                labels = batch.y[test_indices].float()
+            else:
+                preds = out[test_indices].argmax(dim=1)
+                labels = batch.y[test_indices]
 
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
