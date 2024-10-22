@@ -1,3 +1,4 @@
+scikit-learn
 wandb
 torch==2.4.1+cu124
 torch_geometric==2.6.1
