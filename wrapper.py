@@ -6,11 +6,15 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.transforms import RandomNodeSplit
 from sklearn.metrics import f1_score
 from train import train_and_test_model  # Import from train.py
+# from assignment2.atdl.models_v1 import GCN_Model, GCN_JK_Model  # Import the model from models.py
 from models import GCN_Model, GCN_JK_Model  # Import the model from models.py
 import numpy as np
 import wandb
+import time
 
 # wandb.login()
+
+torch.manual_seed(42)
 
 # Create directories if they don't exist
 if not os.path.exists('trained_models'):
@@ -81,7 +85,7 @@ def process_dataset(
         train_dataset = PPI(root='data/PPI', split='train')
         val_dataset = PPI(root='data/PPI', split='val')
         test_dataset = PPI(root='data/PPI', split='test')
-        batch_size = 2  # Adjust based on your memory constraints
+        batch_size = 1  # Adjust based on your memory constraints
 
         # Create DataLoaders for PPI
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -96,10 +100,10 @@ def process_dataset(
 
         batch_size = 32 if name == 'Reddit' else 1
 
-        # Now create the subgraphs for the training, validation, and test sets
-        train_set = data.subgraph(data.train_mask)
-        val_set = data.subgraph(data.val_mask)
-        test_set = data.subgraph(data.test_mask)
+        # # Now create the subgraphs for the training, validation, and test sets
+        # train_set = data.subgraph(data.train_mask)
+        # val_set = data.subgraph(data.val_mask)
+        # test_set = data.subgraph(data.test_mask)
 
         # Create DataLoaders with a single Data object
         # train_loader = DataLoader([train_set], batch_size=batch_size, shuffle=False)
@@ -114,19 +118,19 @@ def process_dataset(
         # layers = 6 if name in ('PPI', 'Reddit') else 3,
         # layers = 6,
         layers=2 if name in ('Citeseer', 'Cora') else 6,
-        epochs = 300,
-        learning_rate = 0.005,  # 0.005 in Xu2018
-        weight_decay = 0.0005,  # 0.0005 in Xu2018
+        epochs = 300 if name in ('Citeseer', 'Cora') else 1000,
+        learning_rate = 0.005 if name in ('Citeseer', 'Cora') else 0.001,  # 0.005 in Xu2018
+        weight_decay = 0.0005 if name in ('Citeseer', 'Cora') else 0,  # 0.0005 in Xu2018
         # weight_decay = 0.001,  # Increase regularization
         # dropout = 0.5
         # dropout = 0.5 if name == 'Reddit' else 0.3
         dropout = 0.5,  # 0.5 in Xu2018
-        hidden_size = 16 if name in ('Citeseer', 'Cora') else 32,
+        hidden_size = 16 if name in ('Citeseer', 'Cora') else 256,
     )
     model_name = model_name_template.format(
         layers=hyperparameters['layers'], epochs=hyperparameters['epochs'])
     if use_jk is True:
-        model_name = f'JK_{model_name}'  # Add JK prefix to distinguish models
+        model_name = f'JK_{model_name}_{jk_mode}'  # Add JK prefix to distinguish models
 
     # Load saved results if available
     saved_results = load_results(name, model_name)
@@ -183,7 +187,9 @@ def process_dataset(
     print(f"Micro F1 Score for {name}: {micro_f1}")
     for k, v in hyperparameters.items():
         print(k, v)
-    print('jk_mode', jk_mode)
+    if use_jk is True:
+        print('jk_mode', jk_mode)
+    print('batch_size', batch_size)
 
     print()
 
@@ -230,9 +236,12 @@ def verify_masks(data):
 
 # Load datasets
 citeseer_data = Planetoid(root='data/Citeseer', name='Citeseer')[0]
+assert len(Planetoid(root='data/Citeseer', name='Citeseer')) == 1
 cora_data = Planetoid(root='data/Cora', name='Cora')[0]
+assert len(Planetoid(root='data/Cora', name='Cora')) == 1
 reddit_data = Reddit(root='data/Reddit')[0]
-ppi_data = PPI(root='data/PPI')[0]
+assert len(Reddit(root='data/Reddit')) == 1
+ppi_data = PPI(root='data/PPI')
 
 # Dictionary of datasets
 datasets = {
@@ -245,7 +254,11 @@ datasets = {
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# # Process each dataset
+# # PPI stats
+# for i, data in enumerate(PPI(root='data/PPI')):
+#     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
+#     print(f"{i}, Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}")
+
 # for name, data in datasets.items():
 #     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
 #     print(f"Dataset: {name}")
@@ -253,16 +266,16 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #     print('is_multilabel', is_multilabel)
 #     print()
 
-jk_mode = 'max'  # Choose 'cat', 'max', or 'lstm'
-
-
-
 for name, data in datasets.items():
+    jk_mode = 'max'  # Choose 'cat', 'max', or 'lstm'
     if name == 'Reddit': continue  # memory issue?
     if name != 'PPI':
         verify_masks(data)
-    wandb.init(project="gcn_project", name=f"{name}_run")
-    process_dataset(
-        name, data, device, model_name_template="{layers}_layers_{epochs}_epochs",
-        use_jk=True, jk_mode=jk_mode)
-    wandb.finish()  # End the WandB run after processing each dataset
+    for use_jk in (True, False):
+        t1 = time.time()
+        wandb.init(project="gcn_project", name=f"{name}_run")
+        process_dataset(
+            name, data, device, model_name_template="{layers}_layers_{epochs}_epochs",
+            use_jk=use_jk, jk_mode=jk_mode)
+        wandb.finish()  # End the WandB run after processing each dataset
+        print('runtime', time.time() - t1)

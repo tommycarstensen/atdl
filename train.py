@@ -44,7 +44,7 @@ def train_loop_with_early_stopping(
     loss_fn,
     optimizer,
     epochs,
-    patience=10,
+    patience=100,
     wandb_iteration=0,
     wandb_toggle=False,
     is_multilabel=False,
@@ -161,9 +161,10 @@ def test_on_testset(
     test_loader,
     model, device, is_multilabel=False,
 ):
+
     model.eval()
-    all_preds = []
-    all_labels = []
+    total_micro_f1 = 0
+    num_batches = 0
 
     with torch.no_grad():
         for batch in test_loader:
@@ -179,26 +180,26 @@ def test_on_testset(
 
             # Get predictions and labels
             if is_multilabel:
+                # Apply sigmoid activation for multi-label classification
                 preds = torch.sigmoid(out[test_indices])
+                # Binarize predictions
                 preds = (preds > 0.5).float()
                 labels = batch.y[test_indices].float()
+                # Compute micro-F1 score for the current batch
+                micro_f1 = f1_score(labels.cpu(), preds.cpu(), average='micro')
+                total_micro_f1 += micro_f1
+                num_batches += 1
             else:
                 preds = out[test_indices].argmax(dim=1)
                 labels = batch.y[test_indices]
+                # Compute accuracy for the current batch
+                acc = accuracy_score(labels.cpu(), preds.cpu())
+                total_micro_f1 += acc
+                num_batches += 1
 
-            all_preds.append(preds.cpu())
-            all_labels.append(labels.cpu())
-
-    all_preds = torch.cat(all_preds)
-    all_labels = torch.cat(all_labels)
-
-    if is_multilabel:
-        micro_f1 = f1_score(all_labels, all_preds, average='micro')
-        mean_acc = torch.tensor(micro_f1)
-        std_acc = torch.tensor(0.0)  # Standard deviation not computed here
-    else:
-        mean_acc = torch.tensor(accuracy_score(all_labels, all_preds))
-        std_acc = torch.tensor(0.0)  # Standard deviation not computed here
+    # Compute the average micro-F1 score across all batches
+    mean_acc = torch.tensor(total_micro_f1 / num_batches)
+    std_acc = torch.tensor(0.0)  # Standard deviation not computed here
 
     return mean_acc, std_acc
 
