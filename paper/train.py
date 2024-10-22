@@ -157,7 +157,7 @@ def train_and_validate(
     return (model, MCAccuracy)
 
 
-def test_on_testset(
+def test_on_testset_generalized(
     test_loader,
     model, device, is_multilabel=False,
     # "Accuracy and standard deviation are computed from 3 random data splits."
@@ -211,6 +211,30 @@ def test_on_testset(
     return mean_acc, std_acc
 
 
+def test_on_testset(test_dataloader: torch_geometric.data.data.Data,
+                    model,
+                    device: str):
+  MCAccuracies = []
+
+  model.eval()
+
+  with torch.no_grad():
+    for _ in range(3):
+      transform = RandomNodeSplit(split = "train_rest", num_val = 0.33, num_test = 0.33)
+      test_data_split = transform(test_dataloader).to(device)
+      test_data_split.subgraph(test_data_split["train_mask"])
+
+      pred = model(test_data_split)
+      metric = MulticlassAccuracy()
+      metric.update(pred.argmax(-1), test_data_split.y)
+      MCAccuracy = metric.compute()
+
+      MCAccuracies.append(MCAccuracy)
+
+  MCAccuracies = torch.Tensor(MCAccuracies)
+
+  return (torch.mean(MCAccuracies), torch.std(MCAccuracies))
+
 
 def train_and_test_model(
     train_loader, val_loader, test_loader,
@@ -236,8 +260,10 @@ def train_and_test_model(
         wandb_toggle=wandb_toggle,
     )
 
-    mean_acc, std_acc = test_on_testset(
-        test_loader,
-        model, device, is_multilabel=is_multilabel)
+    # mean_acc, std_acc = test_on_testset(
+    #     test_loader,
+    #     model, device,
+    #     # is_multilabel=is_multilabel,
+    #     )
 
-    return model, mean_acc, std_acc
+    return model

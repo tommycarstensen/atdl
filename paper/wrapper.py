@@ -154,6 +154,15 @@ def process_dataset(
             loader = DataLoader([data], batch_size=1, shuffle=False)
             train_loader = val_loader = test_loader = loader
 
+            # print('train_loader', len(train_loader))
+            # print('val_loader', len(val_loader))
+            # print('test_loader', len(test_loader))
+
+            # # Create DataLoaders with the subgraphs
+            # train_loader = DataLoader([data.subgraph(data.train_mask)], batch_size=batch_size, shuffle=False)
+            # val_loader = DataLoader([data.subgraph(data.val_mask)], batch_size=batch_size, shuffle=False)
+            # test_loader = DataLoader([data.subgraph(data.test_mask)], batch_size=batch_size, shuffle=False)
+
         # Define the model function
         def model_function(layers, dropout):
             model_kwargs = {
@@ -175,7 +184,8 @@ def process_dataset(
         wandb.init(project="gcn_project", name=f"{dataset_name}_run")
 
         # Train and test the model
-        model_trained, mean_acc, std_acc = train_and_test_model(
+        # model_trained, mean_acc, std_acc = train_and_test_model(
+        model_trained = train_and_test_model(
             train_loader, val_loader, test_loader,
             model_function,
             hyperparameters['layers'],
@@ -194,9 +204,14 @@ def process_dataset(
         save_model(model_trained, name_formatted)
 
         # Evaluate the model using the extracted function
-        mean_acc, std_acc, micro_f1 = eval_model(
-            model_trained, test_loader, device, is_multilabel,
+        # mean_acc, std_acc, micro_f1 = eval_model(
+        mean_acc, std_acc = eval_model_on_test_subsets(
+            model_trained,
+            data,  # apply test mask inside function
+            # data.subgraph(data.test_mask),
+            device, is_multilabel,
         )
+        micro_f1 = 0.0
 
         # Save results
         results = {
@@ -227,112 +242,49 @@ def process_dataset(
     print()
 
 
-def eval_model(model, loader, device, is_multilabel, num_splits=3):
-
-    # TODO: REFACTOR THIS FUNCTION, IF YOU HAVE TIME!!! IT HAS BECOME A MESS!!!
-
+def eval_model_on_test_subsets(model, data, device, is_multilabel=False):
     model.eval()
     accuracies = []
     with torch.no_grad():
-        for split_num in range(num_splits):
-            # Set a different random seed for each split
-            torch.manual_seed(42 + split_num)
-            np.random.seed(42 + split_num)
+        # Identify the test nodes
+        test_indices = data.test_mask.nonzero(as_tuple=True)[0]
+        num_test_nodes = len(test_indices)
+        # Shuffle the test indices
+        shuffled_indices = test_indices[torch.randperm(num_test_nodes)]
+        # Split into three equal parts
+        split_sizes = [num_test_nodes // 3] * 3
+        remainder = num_test_nodes % 3
+        for i in range(remainder):
+            split_sizes[i] += 1  # Distribute remainder
 
-            # For datasets like Cora and Citeseer (single graph)
-            if hasattr(loader.dataset, 'data') and isinstance(loader.dataset.data, torch_geometric.data.Data):
-                data = loader.dataset.data.clone()
-                # Create a new random split
-                transform = RandomNodeSplit(split='random', num_val=0.0, num_test=0.1)
-                data = transform(data).to(device)
+        test_subsets = torch.split(shuffled_indices, split_sizes)
+        
+        for i, test_subset in enumerate(test_subsets):
+            print(f"Evaluating on test subset {i+1}")
+            # Create a mask for the current test subset
+            test_mask_subset = torch.zeros(data.num_nodes, dtype=torch.bool)
+            test_mask_subset[test_subset] = True
 
-                out = model(data.x, data.edge_index)
-                if is_multilabel:
-                    preds = torch.sigmoid(out)
-                    preds = (preds > 0.5).float()
-                    labels = data.y.float()
-                    test_mask = data.test_mask
-                    micro_f1 = f1_score(labels[test_mask].cpu(), preds[test_mask].cpu(), average='micro')
-                    accuracies.append(micro_f1)
-                else:
-                    preds = out.argmax(dim=1)
-                    labels = data.y
-                    test_mask = data.test_mask
-                    acc = accuracy_score(labels[test_mask].cpu(), preds[test_mask].cpu())
-                    accuracies.append(acc)
-            else:
-                # For datasets like PPI (multi-graph)
-                # We can shuffle the test dataset to simulate variability
-                test_dataset = loader.dataset
-                test_loader = DataLoader(test_dataset, batch_size=loader.batch_size, shuffle=True)
-
-                all_preds = []
-                all_labels = []
-                for batch in test_loader:
-                    batch = batch.to(device)
-                    out = model(batch.x, batch.edge_index)
-                    if is_multilabel:
-                        preds = torch.sigmoid(out)
-                        preds = (preds > 0.5).float()
-                        labels = batch.y.float()
-                    else:
-                        preds = out.argmax(dim=1)
-                        labels = batch.y
-
-                    all_preds.append(preds.cpu())
-                    all_labels.append(labels.cpu())
-
-                all_preds = torch.cat(all_preds)
-                all_labels = torch.cat(all_labels)
-
-                if is_multilabel:
-                    micro_f1 = f1_score(all_labels, all_preds, average='micro')
-                    accuracies.append(micro_f1)
-                else:
-                    acc = accuracy_score(all_labels, all_preds)
-                    accuracies.append(acc)
-
-    mean_acc = torch.tensor(accuracies).mean().item()
-    std_acc = torch.tensor(accuracies).std().item()
-
-    # Calculate evaluation metrics
-    micro_f1 = f1_score(all_labels, all_preds, average='micro')
-
-    return mean_acc, std_acc, micro_f1
-
-
-def eval_model_old(model, loader, device, is_multilabel):
-    model.eval()
-    all_preds = []
-    all_labels = []
-    accuracies = []
-    with torch.no_grad():
-        for batch in loader:
-            batch = batch.to(device)
-            out = model(batch.x, batch.edge_index)
-
-            # Determine test indices
-            if hasattr(batch, 'test_mask'):
-                test_indices = batch.test_mask
-            else:
-                # Use all nodes in the batch
-                test_indices = torch.arange(batch.num_nodes, device=device)
-
-            # Get predictions and labels
+            out = model(data.x.to(device), data.edge_index.to(device))
             if is_multilabel:
-                preds = torch.sigmoid(out[test_indices])
+                preds = torch.sigmoid(out)
                 preds = (preds > 0.5).float()
-                labels = batch.y[test_indices].float()
+                labels = data.y.float()
+                metric = f1_score(labels[test_mask_subset].cpu(), preds[test_mask_subset].cpu(), average='micro')
             else:
-                preds = out[test_indices].argmax(dim=1)
-                labels = batch.y[test_indices]
+                preds = out.argmax(dim=1)
+                labels = data.y
+                metric = accuracy_score(labels[test_mask_subset].cpu(), preds[test_mask_subset].cpu())
 
-            all_preds.append(preds.cpu())
-            all_labels.append(labels.cpu())
+            accuracies.append(metric)
 
-    all_preds = torch.cat(all_preds)
-    all_labels = torch.cat(all_labels)
-    return all_preds, all_labels
+    # Compute mean and standard deviation of the accuracies
+    accuracies = torch.tensor(accuracies)
+    mean_acc = accuracies.mean().item()
+    std_acc = accuracies.std().item()
+
+    return mean_acc, std_acc
+
 
 def verify_masks(data):
     train_mask = data.train_mask
@@ -375,14 +327,15 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #     print()
 
 models = {
-    'GCN_JK': GCN_JK_Model,
-    'GAT_JK_Model': GAT_JK_Model,
     'GCN': GCN_Model,
     'GAT': GAT_Model,
+    # 'GCN_JK': GCN_JK_Model,
+    'GAT_JK_Model': GAT_JK_Model,
 }
 
 for dataset_name, data in datasets.items():
     if dataset_name == 'Reddit': continue  # memory issue?
+    if dataset_name == 'PPI': continue  # some other time...
     if dataset_name != 'PPI':
         verify_masks(data)
     # for use_jk in (True, False):
