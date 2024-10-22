@@ -73,7 +73,7 @@ def get_dataset_stats(data):
 def process_dataset(
         dataset_name, data, model_class, model_name,
         layers,
-        device, model_name_template,
+        device, name_template,
         use_jk=False, jk_mode='max',
         ):
     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
@@ -97,13 +97,21 @@ def process_dataset(
         hidden_size = 16 if dataset_name in ('Citeseer', 'Cora') else 256,
     )
 
-    model_name_formatted = model_name_template.format(
-        model_name=model_name, layers=hyperparameters['layers'], epochs=hyperparameters['epochs'],
+    name_formatted = name_template.format(
+        model_name=model_name,
+        dataset_name=dataset_name,
+        layers=hyperparameters['layers'],
+        epochs=hyperparameters['epochs'],
         jk_mode=jk_mode,
         )
 
+    if dataset_name == 'PPI':
+        batch_size = 1  # Adjust based on your memory constraints
+    else:
+        batch_size = 32 if dataset_name == 'Reddit' else 1
+
     # Load saved results if available
-    saved_results = load_results(model_name_formatted)
+    saved_results = load_results(name_formatted)
     if saved_results:
         print(f"Loading saved results for {dataset_name}: {saved_results}")
         mean_acc = saved_results['mean_accuracy']
@@ -125,7 +133,6 @@ def process_dataset(
                 train_dataset = PPI(root='data/PPI', split='train')
                 val_dataset = PPI(root='data/PPI', split='val')
                 test_dataset = PPI(root='data/PPI', split='test')
-                batch_size = 1  # Adjust based on your memory constraints
 
                 # Create DataLoaders for PPI
                 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -133,12 +140,11 @@ def process_dataset(
                 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
             else:
                 # Apply RandomNodeSplit transform to create train/val/test masks
-                transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.1)
+                # "We split nodes in each graph into 60%, 20% and 20% for training, validation and testing."
+                transform = RandomNodeSplit(split='train_rest', num_val=0.2, num_test=0.2)
                 data = transform(data)
                 verify_masks(data)  # Verify masks do not overlap
                 data = data.to(device)  # Move data to the correct device
-
-                batch_size = 32 if dataset_name == 'Reddit' else 1
 
                 # # Now create the subgraphs for the training, validation, and test sets
                 # train_set = data.subgraph(data.train_mask)
@@ -166,7 +172,7 @@ def process_dataset(
                     model_kwargs['jk_mode'] = jk_mode
 
                 model_instance = model_class(**model_kwargs).to(device)
-                if load_model(model_instance, model_name_formatted):
+                if load_model(model_instance, name_formatted):
                     print(f"Loaded model for {dataset_name}")
                 return model_instance
 
@@ -174,7 +180,7 @@ def process_dataset(
             wandb.init(project="gcn_project", name=f"{dataset_name}_run")
 
             # Train and test the model
-            model_trained, mean_acc, std_acc = train_and_test_model(
+            model_trained, mean_acc_run, _ = train_and_test_model(
                 train_loader, val_loader, test_loader,
                 model_function,
                 hyperparameters['layers'],
@@ -190,7 +196,7 @@ def process_dataset(
             wandb.finish()  # End the WandB run after processing each dataset
             print('runtime', time.time() - t1)
 
-            save_model(model_trained, model_name_formatted)
+            save_model(model_trained, name_formatted)
 
             # Evaluate the model using the extracted function
             all_preds, all_labels = eval_model(
@@ -217,17 +223,7 @@ def process_dataset(
             'micro_f1_score': mean_f1,
             'std_f1_score': std_f1,
         }
-        save_results(results, model_name_formatted)
-
-        # print()
-        # print(all_preds[:100])
-        # print(all_labels[:100])
-        # from sklearn.metrics import accuracy_score
-        # acc = accuracy_score(all_labels, all_preds)
-        # print('acc', acc)
-        # acc100 = accuracy_score(all_labels[:100], all_preds[:100])
-        # print('acc100', acc100)
-        # stop5555
+        save_results(results, name_formatted)
 
     print('dataset_name', dataset_name)
     print('model_name', model_name)
@@ -240,7 +236,12 @@ def process_dataset(
     print('batch_size', batch_size)
 
     with open('results.txt', 'a') as file:
-        print(dataset_name, model_name, jk_mode, layers, round(mean_acc, 3), file=file, sep='\t')
+        print(
+            dataset_name, model_name, jk_mode, layers,
+            round(mean_acc.item() if isinstance(mean_acc, torch.Tensor) else mean_acc, 3),
+            round(std_acc.item() if isinstance(std_acc, torch.Tensor) else std_acc, 3),
+            file=file, sep='\t',
+        )
 
     print()
 
@@ -362,5 +363,5 @@ for dataset_name, data in datasets.items():
                 dataset_name, data, model_class, model_name,
                 layers,
                 device,
-                model_name_template="{model_name}_{jk_mode}_{layers}_layers_{epochs}_epochs",
+                name_template="{dataset_name}_{model_name}_{jk_mode}_{layers}_layers_{epochs}_epochs",
                 use_jk=use_jk, jk_mode=jk_mode)
