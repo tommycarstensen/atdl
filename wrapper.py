@@ -119,109 +119,92 @@ def process_dataset(
         micro_f1 = saved_results['micro_f1_score']
     else:
 
-        accuracies = []
-        f1_scores = []
-        split_nums = 3 if dataset_name in ('Citeseer', 'Cora') else 1
+        torch.manual_seed(42)
 
-        for split_num in range(split_nums):
+        # Prepare data loaders
+        if dataset_name == 'PPI':
+            # Load PPI dataset with predefined splits
+            train_dataset = PPI(root='data/PPI', split='train')
+            val_dataset = PPI(root='data/PPI', split='val')
+            test_dataset = PPI(root='data/PPI', split='test')
 
-            torch.manual_seed(42 + split_num)
+            # Create DataLoaders for PPI
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        else:
+            # Apply RandomNodeSplit transform to create train/val/test masks
+            # "We split nodes in each graph into 60%, 20% and 20% for training, validation and testing."
+            transform = RandomNodeSplit(split='train_rest', num_val=0.2, num_test=0.2)
+            data = transform(data)
+            verify_masks(data)  # Verify masks do not overlap
+            data = data.to(device)  # Move data to the correct device
 
-            # Prepare data loaders
-            if dataset_name == 'PPI':
-                # Load PPI dataset with predefined splits
-                train_dataset = PPI(root='data/PPI', split='train')
-                val_dataset = PPI(root='data/PPI', split='val')
-                test_dataset = PPI(root='data/PPI', split='test')
+            # # Now create the subgraphs for the training, validation, and test sets
+            # train_set = data.subgraph(data.train_mask)
+            # val_set = data.subgraph(data.val_mask)
+            # test_set = data.subgraph(data.test_mask)
 
-                # Create DataLoaders for PPI
-                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-                test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-            else:
-                # Apply RandomNodeSplit transform to create train/val/test masks
-                # "We split nodes in each graph into 60%, 20% and 20% for training, validation and testing."
-                transform = RandomNodeSplit(split='train_rest', num_val=0.2, num_test=0.2)
-                data = transform(data)
-                verify_masks(data)  # Verify masks do not overlap
-                data = data.to(device)  # Move data to the correct device
+            # Create DataLoaders with a single Data object
+            # train_loader = DataLoader([train_set], batch_size=batch_size, shuffle=False)
+            # val_loader = DataLoader([val_set], batch_size=batch_size, shuffle=False)
+            # test_loader = DataLoader([test_set], batch_size=batch_size, shuffle=False)
 
-                # # Now create the subgraphs for the training, validation, and test sets
-                # train_set = data.subgraph(data.train_mask)
-                # val_set = data.subgraph(data.val_mask)
-                # test_set = data.subgraph(data.test_mask)
+            loader = DataLoader([data], batch_size=1, shuffle=False)
+            train_loader = val_loader = test_loader = loader
 
-                # Create DataLoaders with a single Data object
-                # train_loader = DataLoader([train_set], batch_size=batch_size, shuffle=False)
-                # val_loader = DataLoader([val_set], batch_size=batch_size, shuffle=False)
-                # test_loader = DataLoader([test_set], batch_size=batch_size, shuffle=False)
+        # Define the model function
+        def model_function(layers, dropout):
+            model_kwargs = {
+                'hidden_size': hyperparameters['hidden_size'],
+                'layers': layers,
+                'output_size': num_classes,
+            }
+            if 'GAT' in model_name:
+                model_kwargs['dropout'] = dropout
+            if use_jk:
+                model_kwargs['jk_mode'] = jk_mode
 
-                loader = DataLoader([data], batch_size=1, shuffle=False)
-                train_loader = val_loader = test_loader = loader
+            model_instance = model_class(**model_kwargs).to(device)
+            if load_model(model_instance, name_formatted):
+                print(f"Loaded model for {dataset_name}")
+            return model_instance
 
-            # Define the model function
-            def model_function(layers, dropout):
-                model_kwargs = {
-                    'hidden_size': hyperparameters['hidden_size'],
-                    'layers': layers,
-                    'output_size': num_classes,
-                }
-                if 'GAT' in model_name:
-                    model_kwargs['dropout'] = dropout
-                if use_jk:
-                    model_kwargs['jk_mode'] = jk_mode
+        t1 = time.time()
+        wandb.init(project="gcn_project", name=f"{dataset_name}_run")
 
-                model_instance = model_class(**model_kwargs).to(device)
-                if load_model(model_instance, name_formatted):
-                    print(f"Loaded model for {dataset_name}")
-                return model_instance
+        # Train and test the model
+        model_trained, mean_acc, std_acc = train_and_test_model(
+            train_loader, val_loader, test_loader,
+            model_function,
+            hyperparameters['layers'],
+            hyperparameters['epochs'],
+            hyperparameters['learning_rate'],
+            hyperparameters['weight_decay'],
+            hyperparameters['dropout'],
+            device,
+            is_multilabel=is_multilabel,
+            wandb_toggle=True,
+        )
 
-            t1 = time.time()
-            wandb.init(project="gcn_project", name=f"{dataset_name}_run")
+        wandb.finish()  # End the WandB run after processing each dataset
+        print('runtime', time.time() - t1)
 
-            # Train and test the model
-            model_trained, mean_acc_run, _ = train_and_test_model(
-                train_loader, val_loader, test_loader,
-                model_function,
-                hyperparameters['layers'],
-                hyperparameters['epochs'],
-                hyperparameters['learning_rate'],
-                hyperparameters['weight_decay'],
-                hyperparameters['dropout'],
-                device,
-                is_multilabel=is_multilabel,
-                wandb_toggle=True,
-            )
+        save_model(model_trained, name_formatted)
 
-            wandb.finish()  # End the WandB run after processing each dataset
-            print('runtime', time.time() - t1)
+        # Evaluate the model using the extracted function
+        all_preds, all_labels = eval_model(
+            model_trained, test_loader, device, is_multilabel,
+        )
 
-            save_model(model_trained, name_formatted)
-
-            # Evaluate the model using the extracted function
-            all_preds, all_labels = eval_model(
-                model_trained, test_loader, device, is_multilabel,
-            )
-
-            # Calculate evaluation metrics
-            micro_f1 = f1_score(all_labels, all_preds, average='micro')
-
-            # Append metrics
-            accuracies.append(mean_acc_run.item())
-            f1_scores.append(micro_f1)
-
-        # Compute mean and standard deviation across the 3 runs
-        mean_acc = torch.tensor(accuracies).mean()
-        std_acc = torch.tensor(accuracies).std()
-        mean_f1 = torch.tensor(f1_scores).mean().item()
-        std_f1 = torch.tensor(f1_scores).std().item()
+        # Calculate evaluation metrics
+        micro_f1 = f1_score(all_labels, all_preds, average='micro')
 
         # Save results
         results = {
-            'mean_accuracy': mean_acc.item(),
-            'std_accuracy': std_acc.item(),
-            'micro_f1_score': mean_f1,
-            'std_f1_score': std_f1,
+            'mean_accuracy': mean_acc,
+            'std_accuracy': std_acc,
+            'micro_f1_score': micro_f1,
         }
         save_results(results, name_formatted)
 
