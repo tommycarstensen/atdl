@@ -14,7 +14,6 @@ import time
 
 # wandb.login()
 
-torch.manual_seed(42)
 
 # Create directories if they don't exist
 if not os.path.exists('trained_models'):
@@ -81,47 +80,13 @@ def process_dataset(
     print(f"Dataset: {dataset_name}")
     print(f"Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}\n")
 
-    # Prepare data loaders
-    if dataset_name == 'PPI':
-        # Load PPI dataset with predefined splits
-        train_dataset = PPI(root='data/PPI', split='train')
-        val_dataset = PPI(root='data/PPI', split='val')
-        test_dataset = PPI(root='data/PPI', split='test')
-        batch_size = 1  # Adjust based on your memory constraints
-
-        # Create DataLoaders for PPI
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    else:
-        # Apply RandomNodeSplit transform to create train/val/test masks
-        transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.1)
-        data = transform(data)
-        verify_masks(data)  # Verify masks do not overlap
-        data = data.to(device)  # Move data to the correct device
-
-        batch_size = 32 if dataset_name == 'Reddit' else 1
-
-        # # Now create the subgraphs for the training, validation, and test sets
-        # train_set = data.subgraph(data.train_mask)
-        # val_set = data.subgraph(data.val_mask)
-        # test_set = data.subgraph(data.test_mask)
-
-        # Create DataLoaders with a single Data object
-        # train_loader = DataLoader([train_set], batch_size=batch_size, shuffle=False)
-        # val_loader = DataLoader([val_set], batch_size=batch_size, shuffle=False)
-        # test_loader = DataLoader([test_set], batch_size=batch_size, shuffle=False)
-
-        loader = DataLoader([data], batch_size=1, shuffle=False)
-        train_loader = val_loader = test_loader = loader
-
     # Model hyperparameters
     hyperparameters = dict(
         # layers = 6 if name in ('PPI', 'Reddit') else 3,
         # layers = 6,
         # layers=2 if dataset_name in ('Citeseer', 'Cora') else 6,
         layers=layers,
-        epochs = 300 if dataset_name in ('Citeseer', 'Cora') else 1000,
+        epochs = 1000 if dataset_name in ('Citeseer', 'Cora') else 1000,
         learning_rate = 0.005 if dataset_name in ('Citeseer', 'Cora') else 0.001,  # 0.005 in Xu2018
         weight_decay = 0.0005 if dataset_name in ('Citeseer', 'Cora') else 0,  # 0.0005 in Xu2018
         # weight_decay = 0.001,  # Increase regularization
@@ -146,58 +111,111 @@ def process_dataset(
         micro_f1 = saved_results['micro_f1_score']
     else:
 
-        # Define the model function
-        def model_function(layers, dropout):
-            model_kwargs = {
-                'hidden_size': hyperparameters['hidden_size'],
-                'layers': layers,
-                'output_size': num_classes,
-            }
-            if 'GAT' in model_name:
-                model_kwargs['dropout'] = dropout
-            if use_jk:
-                model_kwargs['jk_mode'] = jk_mode
+        accuracies = []
+        f1_scores = []
+        split_nums = 3 if dataset_name in ('Citeseer', 'Cora') else 1
 
-            model_instance = model_class(**model_kwargs).to(device)
-            if load_model(model_instance, model_name_formatted):
-                print(f"Loaded model for {dataset_name}")
-            return model_instance
+        for split_num in range(split_nums):
 
-        t1 = time.time()
-        wandb.init(project="gcn_project", name=f"{dataset_name}_run")
+            torch.manual_seed(42 + split_num)
 
-        # Train and test the model
-        model_trained, mean_acc, std_acc = train_and_test_model(
-            train_loader, val_loader, test_loader,
-            model_function,
-            hyperparameters['layers'],
-            hyperparameters['epochs'],
-            hyperparameters['learning_rate'],
-            hyperparameters['weight_decay'],
-            hyperparameters['dropout'],
-            device,
-            is_multilabel=is_multilabel,
-            wandb_toggle=True,
-        )
+            # Prepare data loaders
+            if dataset_name == 'PPI':
+                # Load PPI dataset with predefined splits
+                train_dataset = PPI(root='data/PPI', split='train')
+                val_dataset = PPI(root='data/PPI', split='val')
+                test_dataset = PPI(root='data/PPI', split='test')
+                batch_size = 1  # Adjust based on your memory constraints
 
-        wandb.finish()  # End the WandB run after processing each dataset
-        print('runtime', time.time() - t1)
+                # Create DataLoaders for PPI
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+                test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            else:
+                # Apply RandomNodeSplit transform to create train/val/test masks
+                transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.1)
+                data = transform(data)
+                verify_masks(data)  # Verify masks do not overlap
+                data = data.to(device)  # Move data to the correct device
 
-        save_model(model_trained, model_name_formatted)
+                batch_size = 32 if dataset_name == 'Reddit' else 1
 
-        # Evaluate the model using the extracted function
-        all_preds, all_labels = eval_model(
-            model_trained, test_loader, device, is_multilabel,
-        )
+                # # Now create the subgraphs for the training, validation, and test sets
+                # train_set = data.subgraph(data.train_mask)
+                # val_set = data.subgraph(data.val_mask)
+                # test_set = data.subgraph(data.test_mask)
 
-        # Calculate evaluation metrics
-        micro_f1 = f1_score(all_labels, all_preds, average='micro')
+                # Create DataLoaders with a single Data object
+                # train_loader = DataLoader([train_set], batch_size=batch_size, shuffle=False)
+                # val_loader = DataLoader([val_set], batch_size=batch_size, shuffle=False)
+                # test_loader = DataLoader([test_set], batch_size=batch_size, shuffle=False)
+
+                loader = DataLoader([data], batch_size=1, shuffle=False)
+                train_loader = val_loader = test_loader = loader
+
+            # Define the model function
+            def model_function(layers, dropout):
+                model_kwargs = {
+                    'hidden_size': hyperparameters['hidden_size'],
+                    'layers': layers,
+                    'output_size': num_classes,
+                }
+                if 'GAT' in model_name:
+                    model_kwargs['dropout'] = dropout
+                if use_jk:
+                    model_kwargs['jk_mode'] = jk_mode
+
+                model_instance = model_class(**model_kwargs).to(device)
+                if load_model(model_instance, model_name_formatted):
+                    print(f"Loaded model for {dataset_name}")
+                return model_instance
+
+            t1 = time.time()
+            wandb.init(project="gcn_project", name=f"{dataset_name}_run")
+
+            # Train and test the model
+            model_trained, mean_acc, std_acc = train_and_test_model(
+                train_loader, val_loader, test_loader,
+                model_function,
+                hyperparameters['layers'],
+                hyperparameters['epochs'],
+                hyperparameters['learning_rate'],
+                hyperparameters['weight_decay'],
+                hyperparameters['dropout'],
+                device,
+                is_multilabel=is_multilabel,
+                wandb_toggle=True,
+            )
+
+            wandb.finish()  # End the WandB run after processing each dataset
+            print('runtime', time.time() - t1)
+
+            save_model(model_trained, model_name_formatted)
+
+            # Evaluate the model using the extracted function
+            all_preds, all_labels = eval_model(
+                model_trained, test_loader, device, is_multilabel,
+            )
+
+            # Calculate evaluation metrics
+            micro_f1 = f1_score(all_labels, all_preds, average='micro')
+
+            # Append metrics
+            accuracies.append(mean_acc_run.item())
+            f1_scores.append(micro_f1)
+
+        # Compute mean and standard deviation across the 3 runs
+        mean_acc = torch.tensor(accuracies).mean()
+        std_acc = torch.tensor(accuracies).std()
+        mean_f1 = torch.tensor(f1_scores).mean().item()
+        std_f1 = torch.tensor(f1_scores).std().item()
 
         # Save results
         results = {
             'mean_accuracy': mean_acc.item(),
             'std_accuracy': std_acc.item(),
-            'micro_f1_score': micro_f1,
+            'micro_f1_score': mean_f1,
+            'std_f1_score': std_f1,
         }
         save_results(results, model_name_formatted)
 
@@ -220,6 +238,9 @@ def process_dataset(
     if use_jk is True:
         print('jk_mode', jk_mode)
     print('batch_size', batch_size)
+
+    with open('results.txt', 'a') as file:
+        print(dataset_name, model_name, jk_mode, layers, round(mean_acc, 3), file=file, sep='\t')
 
     print()
 
@@ -323,17 +344,17 @@ for dataset_name, data in datasets.items():
                     if model_name in ('GCN', 'GAT'):
                         layers = 2
                     elif 'JK' in model_name:
-                        if jk_mode in ('max', 'concat'):
+                        if jk_mode in ('max', 'cat'):
                             layers = 1
                         else:
                             layers = 2
-                if dataset_name == 'Core':
+                if dataset_name == 'Cora':
                     if model_name == 'GCN':
                         layers = 2
                     elif model_name == 'GAT':
                         layers = 3
                     elif 'JK' in model_name:
-                        if jk_mode in ('max', 'concat'):
+                        if jk_mode in ('max', 'cat'):
                             layers = 6
                         else:
                             layers = 1
