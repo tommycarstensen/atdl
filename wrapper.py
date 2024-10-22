@@ -7,7 +7,7 @@ from torch_geometric.transforms import RandomNodeSplit
 from sklearn.metrics import f1_score
 from train import train_and_test_model  # Import from train.py
 # from assignment2.atdl.models_v1 import GCN_Model, GCN_JK_Model  # Import the model from models.py
-from models import GCN_Model, GCN_JK_Model  # Import the model from models.py
+from models import GCN_Model, GAT_Model, GCN_JK_Model, GAT_JK_Model
 import numpy as np
 import wandb
 import time
@@ -23,20 +23,20 @@ if not os.path.exists('results'):
     os.makedirs('results')
 
 # Helper functions to save and load models and results
-def save_model(model, model_name, dataset_name):
-    model_path = f'trained_models/{dataset_name}_{model_name}.pt'
+def save_model(model, name_formatted):
+    model_path = f'trained_models/{name_formatted}.pt'
     torch.save(model.state_dict(), model_path)
 
-def load_model(model, model_name, dataset_name):
-    model_path = f'trained_models/{dataset_name}_{model_name}.pt'
+def load_model(model, name_formatted):
+    model_path = f'trained_models/{name_formatted}.pt'
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, weights_only=True))
         print(f"Loaded model from {model_path}")
         return True
     return False
 
-def save_results(results, dataset_name, model_name):
-    results_path = f'results/{dataset_name}_{model_name}_results.json'
+def save_results(results, name_formatted):
+    results_path = f'results/{name_formatted}_results.json'
     
     # Convert non-serializable types to standard Python types
     for key, value in results.items():
@@ -48,8 +48,8 @@ def save_results(results, dataset_name, model_name):
     with open(results_path, 'w') as f:
         json.dump(results, f)
 
-def load_results(dataset_name, model_name):
-    results_path = f'results/{dataset_name}_{model_name}_results.json'
+def load_results(name_formatted):
+    results_path = f'results/{name_formatted}_results.json'
     if os.path.exists(results_path):
         with open(results_path, 'r') as f:
             return json.load(f)
@@ -72,15 +72,17 @@ def get_dataset_stats(data):
 
 
 def process_dataset(
-        name, data, device, model_name_template,
+        dataset_name, data, model_class, model_name,
+        layers,
+        device, model_name_template,
         use_jk=False, jk_mode='max',
         ):
     num_nodes, num_edges, num_features, num_classes, is_multilabel = get_dataset_stats(data)
-    print(f"Dataset: {name}")
+    print(f"Dataset: {dataset_name}")
     print(f"Nodes: {num_nodes}, Edges: {num_edges}, Features: {num_features}, Classes: {num_classes}\n")
 
     # Prepare data loaders
-    if name == 'PPI':
+    if dataset_name == 'PPI':
         # Load PPI dataset with predefined splits
         train_dataset = PPI(root='data/PPI', split='train')
         val_dataset = PPI(root='data/PPI', split='val')
@@ -98,7 +100,7 @@ def process_dataset(
         verify_masks(data)  # Verify masks do not overlap
         data = data.to(device)  # Move data to the correct device
 
-        batch_size = 32 if name == 'Reddit' else 1
+        batch_size = 32 if dataset_name == 'Reddit' else 1
 
         # # Now create the subgraphs for the training, validation, and test sets
         # train_set = data.subgraph(data.train_mask)
@@ -117,40 +119,52 @@ def process_dataset(
     hyperparameters = dict(
         # layers = 6 if name in ('PPI', 'Reddit') else 3,
         # layers = 6,
-        layers=2 if name in ('Citeseer', 'Cora') else 6,
-        epochs = 300 if name in ('Citeseer', 'Cora') else 1000,
-        learning_rate = 0.005 if name in ('Citeseer', 'Cora') else 0.001,  # 0.005 in Xu2018
-        weight_decay = 0.0005 if name in ('Citeseer', 'Cora') else 0,  # 0.0005 in Xu2018
+        # layers=2 if dataset_name in ('Citeseer', 'Cora') else 6,
+        layers=layers,
+        epochs = 300 if dataset_name in ('Citeseer', 'Cora') else 1000,
+        learning_rate = 0.005 if dataset_name in ('Citeseer', 'Cora') else 0.001,  # 0.005 in Xu2018
+        weight_decay = 0.0005 if dataset_name in ('Citeseer', 'Cora') else 0,  # 0.0005 in Xu2018
         # weight_decay = 0.001,  # Increase regularization
         # dropout = 0.5
         # dropout = 0.5 if name == 'Reddit' else 0.3
-        dropout = 0.5,  # 0.5 in Xu2018
-        hidden_size = 16 if name in ('Citeseer', 'Cora') else 256,
+        # dropout = 0.5,  # 0.5 in Xu2018
+        dropout = 0.5 if 'GAT' in model_name else 0.0,
+        hidden_size = 16 if dataset_name in ('Citeseer', 'Cora') else 256,
     )
-    model_name = model_name_template.format(
-        layers=hyperparameters['layers'], epochs=hyperparameters['epochs'])
-    if use_jk is True:
-        model_name = f'JK_{model_name}_{jk_mode}'  # Add JK prefix to distinguish models
+
+    model_name_formatted = model_name_template.format(
+        model_name=model_name, layers=hyperparameters['layers'], epochs=hyperparameters['epochs'],
+        jk_mode=jk_mode,
+        )
 
     # Load saved results if available
-    saved_results = load_results(name, model_name)
+    saved_results = load_results(model_name_formatted)
     if saved_results:
-        print(f"Loading saved results for {name}: {saved_results}")
+        print(f"Loading saved results for {dataset_name}: {saved_results}")
         mean_acc = saved_results['mean_accuracy']
         std_acc = saved_results['std_accuracy']
         micro_f1 = saved_results['micro_f1_score']
     else:
+
         # Define the model function
         def model_function(layers, dropout):
-            if use_jk is True:
-                model = GCN_JK_Model(
-                    hidden_size=hyperparameters['hidden_size'], layers=layers, jk_mode=jk_mode, output_size=num_classes).to(device)
-            else:
-                model = GCN_Model(
-                    hidden_size=hyperparameters['hidden_size'], layers=layers, output_size=num_classes).to(device)
-            if load_model(model, model_name, name):
-                print(f"Loaded model for {name}")
-            return model
+            model_kwargs = {
+                'hidden_size': hyperparameters['hidden_size'],
+                'layers': layers,
+                'output_size': num_classes,
+            }
+            if 'GAT' in model_name:
+                model_kwargs['dropout'] = dropout
+            if use_jk:
+                model_kwargs['jk_mode'] = jk_mode
+
+            model_instance = model_class(**model_kwargs).to(device)
+            if load_model(model_instance, model_name_formatted):
+                print(f"Loaded model for {dataset_name}")
+            return model_instance
+
+        t1 = time.time()
+        wandb.init(project="gcn_project", name=f"{dataset_name}_run")
 
         # Train and test the model
         model_trained, mean_acc, std_acc = train_and_test_model(
@@ -165,7 +179,11 @@ def process_dataset(
             is_multilabel=is_multilabel,
             wandb_toggle=True,
         )
-        save_model(model_trained, model_name, name)
+
+        wandb.finish()  # End the WandB run after processing each dataset
+        print('runtime', time.time() - t1)
+
+        save_model(model_trained, model_name_formatted)
 
         # Evaluate the model using the extracted function
         all_preds, all_labels = eval_model(
@@ -181,10 +199,22 @@ def process_dataset(
             'std_accuracy': std_acc.item(),
             'micro_f1_score': micro_f1,
         }
-        save_results(results, name, model_name)
+        save_results(results, model_name_formatted)
 
-    print(f"Mean accuracy for {name}: {mean_acc}, Standard deviation: {std_acc}")
-    print(f"Micro F1 Score for {name}: {micro_f1}")
+        # print()
+        # print(all_preds[:100])
+        # print(all_labels[:100])
+        # from sklearn.metrics import accuracy_score
+        # acc = accuracy_score(all_labels, all_preds)
+        # print('acc', acc)
+        # acc100 = accuracy_score(all_labels[:100], all_preds[:100])
+        # print('acc100', acc100)
+        # stop5555
+
+    print('dataset_name', dataset_name)
+    print('model_name', model_name)
+    print(f"Mean accuracy for {dataset_name}: {mean_acc}, Standard deviation: {std_acc}")
+    print(f"Micro F1 Score for {dataset_name}: {micro_f1}")
     for k, v in hyperparameters.items():
         print(k, v)
     if use_jk is True:
@@ -266,16 +296,50 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #     print('is_multilabel', is_multilabel)
 #     print()
 
-for name, data in datasets.items():
-    jk_mode = 'max'  # Choose 'cat', 'max', or 'lstm'
-    if name == 'Reddit': continue  # memory issue?
-    if name != 'PPI':
+models = {
+    'GCN': GCN_Model,
+    'GAT': GAT_Model,
+    'GCN_JK': GCN_JK_Model,
+    'GAT_JK_Model': GAT_JK_Model,
+}
+
+for dataset_name, data in datasets.items():
+    if dataset_name == 'Reddit': continue  # memory issue?
+    if dataset_name != 'PPI':
         verify_masks(data)
-    for use_jk in (True, False):
-        t1 = time.time()
-        wandb.init(project="gcn_project", name=f"{name}_run")
-        process_dataset(
-            name, data, device, model_name_template="{layers}_layers_{epochs}_epochs",
-            use_jk=use_jk, jk_mode=jk_mode)
-        wandb.finish()  # End the WandB run after processing each dataset
-        print('runtime', time.time() - t1)
+    # for use_jk in (True, False):
+    for model_name, model_class in models.items():
+        if 'JK' in model_name:
+            use_jk = True
+            jk_modes = ['max', 'cat', 'lstm']
+        else:
+            use_jk = False
+            jk_modes = ['']
+        for jk_mode in jk_modes:
+            if dataset_name not in ('Cora', 'Citeseer'):
+                layers = 6
+            else:
+                if dataset_name == 'Citeseer':
+                    if model_name in ('GCN', 'GAT'):
+                        layers = 2
+                    elif 'JK' in model_name:
+                        if jk_mode in ('max', 'concat'):
+                            layers = 1
+                        else:
+                            layers = 2
+                if dataset_name == 'Core':
+                    if model_name == 'GCN':
+                        layers = 2
+                    elif model_name == 'GAT':
+                        layers = 3
+                    elif 'JK' in model_name:
+                        if jk_mode in ('max', 'concat'):
+                            layers = 6
+                        else:
+                            layers = 1
+            process_dataset(
+                dataset_name, data, model_class, model_name,
+                layers,
+                device,
+                model_name_template="{model_name}_{jk_mode}_{layers}_layers_{epochs}_epochs",
+                use_jk=use_jk, jk_mode=jk_mode)
